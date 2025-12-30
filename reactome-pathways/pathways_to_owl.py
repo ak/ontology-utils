@@ -1,11 +1,10 @@
-"""
-Reactome Pathways to OWL Converter
-"""
-
-import requests
 import sys
 import argparse
-from rdflib import Graph, Namespace, Literal, URIRef
+import csv
+import re
+
+import requests
+from rdflib import Graph, Namespace, Literal
 from rdflib.namespace import RDF, RDFS, OWL
 
 
@@ -45,7 +44,14 @@ def create_owl_graph():
     return g, REACTOME
 
 
-def add_pathway_to_graph(g, reactome_ns, pathway, parent_id=None):
+def add_pathway_to_graph(
+    g,
+    reactome_ns,
+    pathway,
+    parent_id=None,
+    top_level_id=None,
+    pathway_list=None,
+):
     """
     Recursively add pathway and its children to RDF graph
     Only includes entries with type 'Pathway' or 'TopLevelPathway'
@@ -55,6 +61,8 @@ def add_pathway_to_graph(g, reactome_ns, pathway, parent_id=None):
         reactome_ns: Reactome namespace
         pathway: Pathway data from Reactome API
         parent_id: Parent pathway ID (for subClassOf relationship)
+        top_level_id: Top-level parent pathway ID
+        pathway_list: List to collect pathway info for CSV export
     """
     pathway_type = pathway.get("type", "Pathway")
 
@@ -63,7 +71,9 @@ def add_pathway_to_graph(g, reactome_ns, pathway, parent_id=None):
         # Still recurse through children in case they are Pathways
         if "children" in pathway and pathway["children"]:
             for child in pathway["children"]:
-                add_pathway_to_graph(g, reactome_ns, child, parent_id)
+                add_pathway_to_graph(
+                    g, reactome_ns, child, parent_id, top_level_id, pathway_list
+                )
         return
 
     pathway_id = pathway.get("stId", pathway.get("dbId"))
@@ -74,8 +84,21 @@ def add_pathway_to_graph(g, reactome_ns, pathway, parent_id=None):
     if not label_text:
         if "children" in pathway and pathway["children"]:
             for child in pathway["children"]:
-                add_pathway_to_graph(g, reactome_ns, child, parent_id)
+                add_pathway_to_graph(
+                    g, reactome_ns, child, parent_id, top_level_id, pathway_list
+                )
         return
+
+    # Add to pathway list for CSV export
+    current_top_level = pathway_id if parent_id is None else top_level_id
+    if pathway_list is not None:
+        pathway_list.append(
+            {
+                "id": pathway_id,
+                "parent_id": current_top_level,
+                "name": label_text,
+            }
+        )
 
     # Create pathway URI
     pathway_uri = reactome_ns[str(pathway_id)]
@@ -99,7 +122,14 @@ def add_pathway_to_graph(g, reactome_ns, pathway, parent_id=None):
     # Recursively process children
     if "children" in pathway and pathway["children"]:
         for child in pathway["children"]:
-            add_pathway_to_graph(g, reactome_ns, child, pathway_id)
+            add_pathway_to_graph(
+                g,
+                reactome_ns,
+                child,
+                pathway_id,
+                current_top_level,
+                pathway_list,
+            )
 
 
 def count_pathways(pathways):
@@ -130,14 +160,15 @@ def convert_reactome_to_owl(species_id):
 
     # Create RDF graph
     g, reactome_ns = create_owl_graph()
+    pathway_list = []
 
     # Add all pathways to graph
     print("Converting to OWL format...")
     for pathway in pathways:
-        add_pathway_to_graph(g, reactome_ns, pathway)
+        add_pathway_to_graph(g, reactome_ns, pathway, pathway_list=pathway_list)
 
     print(f"Conversion complete! Added {len(g)} triples to the graph.")
-    return g
+    return g, pathway_list
 
 
 def main():
@@ -156,13 +187,24 @@ def main():
     )
     args = parser.parse_args()
 
-    graph = convert_reactome_to_owl(species_id=args.species_id)
+    graph, pathway_list = convert_reactome_to_owl(species_id=args.species_id)
 
     # Write to file in RDF/XML format
     output_file = args.output
     graph.serialize(destination=output_file, format="pretty-xml")
 
     print(f"\nOWL file saved to: {output_file}")
+
+    # Write pathway summary to CSV file
+    csv_output_file = re.sub(
+        r"\.owl$", "_summary.csv", output_file, flags=re.IGNORECASE
+    )
+    with open(csv_output_file, "w", newline="", encoding="utf-8") as csvfile:
+        fieldnames = ["id", "parent_id", "name"]
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for pathway in pathway_list:
+            writer.writerow(pathway)
 
     # Also print some sample triples
     print("\n--- Sample triples (first 20) ---")
